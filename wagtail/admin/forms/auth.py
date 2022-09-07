@@ -34,16 +34,14 @@ class LoginForm(AuthenticationForm):
 
 class PasswordResetForm(DjangoPasswordResetForm):
     email = forms.EmailField(
-        label=gettext_lazy("Enter your email address to reset your password"),
+        label=gettext_lazy("Email"),
         max_length=254,
-        required=True,
+        widget=forms.EmailInput(
+            attrs={
+                "placeholder": gettext_lazy("Enter email"),
+            }
+        ),
     )
-
-    @property
-    def extra_fields(self):
-        for field_name in self.fields.keys():
-            if field_name not in ["email"]:
-                yield field_name, self[field_name]
 
 
 class PasswordChangeForm(DjangoPasswordChangeForm):

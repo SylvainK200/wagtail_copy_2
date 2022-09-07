@@ -73,13 +73,13 @@ class SearchFilterMixin(forms.Form):
 
     def filter(self, objects):
         objects = super().filter(objects)
-        search_query = self.cleaned_data.get("q")
-        if search_query:
-            search_backend = get_search_backend()
-            objects = search_backend.search(search_query, objects)
+        self.search_query = self.cleaned_data["q"]
+
+        if self.search_query:
             self.is_searching = True
-            self.search_query = search_query
-        return objects
+            return objects.search(self.search_query)
+        else:
+            return objects
 
 
 class CollectionFilterMixin(forms.Form):
