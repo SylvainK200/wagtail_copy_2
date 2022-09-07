@@ -34,20 +34,62 @@ class Command(BaseCommand):
         return "[" + ", ".join(map(str, numberlist)) + "]"
 
     def handle(self, **options):
-        any_page_problems_fixed = False
-        for page in Page.objects.all():
-            try:
-                page.specific
-            except page.specific_class.DoesNotExist:
-                self.stdout.write(
-                    "Page %d (%s) is missing a subclass record; deleting."
-                    % (page.id, page.title)
-                )
-                any_page_problems_fixed = True
-                page.delete()
+        interactive = options["interactive"]
+        full = options["full"]
 
-        self.handle_model(Page, "page", "pages", any_page_problems_fixed, options)
-        self.handle_model(Collection, "collection", "collections", False, options)
+        # Check for orphans
+        # An orphan is a page that has no parent (i.e. it's not the root page)
+        # and also has no children. This means that it's effectively unreachable
+        # from the root page, and it will never be shown in the page explorer
+        orphans = Page.objects.filter(depth=2, numchild=0)
+        if orphans.exists():
+            self.stdout.write(
+                "The following pages are orphans and will be deleted: %s"
+                % self.numberlist_to_string(orphans.values_list("id", flat=True))
+            )
+            if interactive:
+                if input("Are you sure you want to delete these pages? (y/n) ") == "y":
+                    orphans.delete()
+            else:
+                orphans.delete()
+
+        # Check for pages with invalid paths
+        # A page with an invalid path is one where the path field does not match
+        # the actual path of the page in the tree. This can happen when pages are
+        # moved or deleted, but the path field is not updated to reflect the
+        # change
+        if full:
+            invalid_paths = Page.objects.filter(depth__gt=2).exclude(
+                path=models.F("parent__path") + models.F("parent__id").astype("text")
+            )
+
+            if invalid_paths.exists():
+                self.stdout.write(
+                    "The following pages have invalid paths and will be fixed: %s"
+                    % self.numberlist_to_string(
+                        invalid_paths.values_list("id", flat=True)
+                    )
+                )
+                if interactive:
+                    if input("Are you sure you want to fix these pages? (y/n) ") == "y":
+                        for page in invalid_paths:
+                            page.update_path()
+                else:
+                    for page in invalid_paths:
+                        page.update_path()
+
+        # Check for pages with invalid depths
+        # A page with an invalid depth is one where the depth field does not match
+        # the actual depth of the page in the tree. This can happen when pages are
+        # moved or deleted, but the depth field is not updated to reflect the
+        # change
+        if full:
+            invalid_depths = Page.objects.filter(
+                depth__gt=1
+            ).exclude(depth=models.F("parent__depth") + 1)
+
+            if invalid_depth
+
 
     def handle_model(
         self, model, model_name, model_name_plural, any_problems_fixed, options

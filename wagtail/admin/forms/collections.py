@@ -241,51 +241,34 @@ class BaseGroupCollectionMemberPermissionFormSet(forms.BaseFormSet):
     @transaction.atomic
     def save(self):
         if self.instance.pk is None:
-            raise Exception(
-                "Cannot save a GroupCollectionMemberPermissionFormSet "
-                "for an unsaved group instance"
-            )
+            self.instance.save()
 
-        # get a set of (collection, permission) tuples for all ticked permissions
-        forms_to_save = [
-            form
-            for form in self.forms
-            if form not in self.deleted_forms and "collection" in form.cleaned_data
-        ]
-
-        final_permission_records = set()
-        for form in forms_to_save:
-            for permission in form.cleaned_data["permissions"]:
-                final_permission_records.add(
-                    (form.cleaned_data["collection"], permission)
-                )
-
-        # fetch the group's existing collection permission records for this model,
-        # and from that, build a list of records to be created / deleted
-        permission_ids_to_delete = []
-        permission_records_to_keep = set()
-
-        for cp in self.instance.collection_permissions.filter(
-            permission__in=self.permission_queryset,
-        ):
-            if (cp.collection, cp.permission) in final_permission_records:
-                permission_records_to_keep.add((cp.collection, cp.permission))
-            else:
-                permission_ids_to_delete.append(cp.id)
-
-        self.instance.collection_permissions.filter(
-            id__in=permission_ids_to_delete
-        ).delete()
-
-        permissions_to_add = final_permission_records - permission_records_to_keep
-        GroupCollectionPermission.objects.bulk_create(
-            [
-                GroupCollectionPermission(
-                    group=self.instance, collection=collection, permission=permission
-                )
-                for (collection, permission) in permissions_to_add
-            ]
+        existing_permissions = self.instance.collection_permissions.filter(
+            permission__in=self.permission_queryset
         )
+
+        for form in self.forms:
+            if form in self.deleted_forms:
+                continue
+
+            if form.cleaned_data["collection"] is None:
+                continue
+
+            collection = form.cleaned_data["collection"]
+            permissions = form.cleaned_data["permissions"]
+
+            for permission in permissions:
+                GroupCollectionPermission.objects.get_or_create(
+                    group=self.instance,
+                    collection=collection,
+                    permission=permission,
+                )
+
+        for existing_permission in existing_permissions:
+            if existing_permission not in self.cleaned_data:
+                existing_permission.delete()
+
+       
 
     def as_admin_panel(self):
         return render_to_string(

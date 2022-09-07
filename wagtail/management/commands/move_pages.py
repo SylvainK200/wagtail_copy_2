@@ -9,23 +9,12 @@ class Command(BaseCommand):
         parser.add_argument("from_id", type=int)
         parser.add_argument("to_id", type=int)
 
+    
     def handle(self, *args, **options):
         # Get pages
-        from_page = Page.objects.get(pk=options["from_id"])
-        to_page = Page.objects.get(pk=options["to_id"])
-        pages = from_page.get_children()
+        from_page = Page.objects.get(id=options["from_id"])
+        to_page = Page.objects.get(id=options["to_id"])
 
-        # Move the pages
-        self.stdout.write(
-            "Moving "
-            + str(len(pages))
-            + ' pages from "'
-            + from_page.title
-            + '" to "'
-            + to_page.title
-            + '"'
-        )
-        for page in pages:
-            page.move(to_page, pos="last-child")
-
-        self.stdout.write("Done")
+        # Move pages
+        from_page.move(to_page, pos="last-child")
+        self.stdout.write("Moved page '%s' to '%s'" % (from_page, to_page))
