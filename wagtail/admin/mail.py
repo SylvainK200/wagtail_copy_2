@@ -35,123 +35,96 @@ def send_mail(subject, message, recipient_list, from_email=None, **kwargs):
     Wrapper around Django's EmailMultiAlternatives as done in send_mail().
     Custom from_email handling and special Auto-Submitted header.
     """
-    if not from_email:
-        if hasattr(settings, "WAGTAILADMIN_NOTIFICATION_FROM_EMAIL"):
-            from_email = settings.WAGTAILADMIN_NOTIFICATION_FROM_EMAIL
-        elif hasattr(settings, "DEFAULT_FROM_EMAIL"):
-            from_email = settings.DEFAULT_FROM_EMAIL
-        else:
-            # We are no longer using the term `webmaster` except in this case, where we continue to match Django's default: https://github.com/django/django/blob/stable/3.2.x/django/conf/global_settings.py#L223
-            from_email = "webmaster@localhost"
+    if from_email is None:
+        from_email = settings.DEFAULT_FROM_EMAIL
 
-    connection = kwargs.get("connection", False) or get_connection(
-        username=kwargs.get("auth_user", None),
-        password=kwargs.get("auth_password", None),
-        fail_silently=kwargs.get("fail_silently", None),
-    )
-    multi_alt_kwargs = {
-        "connection": connection,
-        "headers": {
-            "Auto-Submitted": "auto-generated",
-        },
-    }
-    mail = EmailMultiAlternatives(
-        subject, message, from_email, recipient_list, **multi_alt_kwargs
-    )
-    html_message = kwargs.get("html_message", None)
-    if html_message:
-        mail.attach_alternative(html_message, "text/html")
+    headers = kwargs.pop("headers", None)
+    if headers is None:
+        headers = {}
+    headers["Auto-Submitted"] = "auto-generated"
 
-    return mail.send()
+    email_message = EmailMultiAlternatives(
+        subject, message, from_email, recipient_list, headers=headers, **kwargs
+    )
+    email_message.send()
 
 
 def send_moderation_notification(revision, notification, excluded_user=None):
     # Get list of recipients
-    if notification == "submitted":
-        # Get list of publishers
-        include_superusers = getattr(
-            settings, "WAGTAILADMIN_NOTIFICATION_INCLUDE_SUPERUSERS", True
-        )
+    recipient_users = get_user_model().objects.none()
+    if notification == "submitted_for_moderation":
+        # Get users with permission to publish
         recipient_users = users_with_page_permission(
-            revision.content_object, "publish", include_superusers
+            revision.page, permission_type="publish"
         )
-    elif notification in ["rejected", "approved"]:
-        # Get submitter
-        recipient_users = [revision.user] if revision.user else []
-    else:
-        return False
+    elif notification == "approved_moderation":
+        # Get users with permission to edit
+        recipient_users = users_with_page_permission(
+            revision.page, permission_type="edit"
+        )
 
+    # Exclude excluded_user
     if excluded_user:
-        recipient_users = [user for user in recipient_users if user != excluded_user]
+        recipient_users = recipient_users.exclude(pk=excluded_user.pk)
 
-    return send_notification(recipient_users, notification, {"revision": revision})
+    # Return if there are no recipients
+    if not recipient_users:
+        return True
+
+    # Get page title
+    page_title = revision.page.get_admin_display_title()
+
+    # Get revision url
+    revision_url = revision.page.get_admin_url() + "revisions/" + str(revision.id) + "/"
+
+    # Send notification
+    return send_notification(
+        recipient_users,
+        notification,
+        {
+            "page": revision.page,
+            "page_title": page_title,
+            "revision": revision,
+            "revision_url": revision_url,
+        },
+    )
 
 
 def send_notification(recipient_users, notification, extra_context):
     # Get list of email addresses
-    email_recipients = [
-        recipient
-        for recipient in recipient_users
-        if recipient.is_active
-        and recipient.email
-        and getattr(
-            UserProfile.get_for_user(recipient), notification + "_notifications"
-        )
+    recipient_emails = [
+        user.email for user in recipient_users if user.email and user.is_active
     ]
 
-    # Return if there are no email addresses
-    if not email_recipients:
-        return True
-
-    # Get template
-    template_subject = "wagtailadmin/notifications/" + notification + "_subject.txt"
-    template_text = "wagtailadmin/notifications/" + notification + ".txt"
-    template_html = "wagtailadmin/notifications/" + notification + ".html"
-
-    # Common context to template
+    # Get extra context
     context = {
-        "settings": settings,
+        "site_name": settings.WAGTAIL_SITE_NAME,
+        "protocol": "https" if settings.WAGTAILADMIN_NOTIFICATION_USE_HTTPS else "http",
     }
     context.update(extra_context)
 
+    # Render email
+    subject = render_to_string(
+        "wagtailadmin/notifications/%s/subject.txt" % notification, context
+    )
+    # Email subject *must not* contain newlines
+    subject = "".join(subject.splitlines())
+    body = render_to_string(
+        "wagtailadmin/notifications/%s/body.txt" % notification, context
+    )
+
+    # Send email
     connection = get_connection()
+    if isinstance(connection, OpenedConnection):
+        # If the connection is already open, send_mail will close it
+        # so we need to open it again
+        return send_mail(
+            subject, body, recipient_emails, connection=connection, fail_silently=False
+        )
+    else:
+        return send_mail(subject, body, recipient_emails, fail_silently=False)
 
-    with OpenedConnection(connection) as open_connection:
-
-        # Send emails
-        sent_count = 0
-        for recipient in email_recipients:
-            # update context with this recipient
-            context["user"] = recipient
-
-            # Translate text to the recipient language settings
-            with override(recipient.wagtail_userprofile.get_preferred_language()):
-                # Get email subject and content
-                email_subject = render_to_string(template_subject, context).strip()
-                email_content = render_to_string(template_text, context).strip()
-
-            kwargs = {}
-            if getattr(settings, "WAGTAILADMIN_NOTIFICATION_USE_HTML", False):
-                kwargs["html_message"] = render_to_string(template_html, context)
-
-            try:
-                # Send email
-                send_mail(
-                    email_subject,
-                    email_content,
-                    [recipient.email],
-                    connection=open_connection,
-                    **kwargs,
-                )
-                sent_count += 1
-            except Exception:
-                logger.exception(
-                    "Failed to send notification email '%s' to %s",
-                    email_subject,
-                    recipient.email,
-                )
-
-    return sent_count == len(email_recipients)
+=======
 
 
 class Notifier:
@@ -249,55 +222,29 @@ class EmailNotificationMixin:
         }
 
     def send_emails(self, template_set, context, recipients, **kwargs):
+        messages = []
 
-        connection = get_connection()
-        sent_count = 0
-        try:
-            with OpenedConnection(connection) as open_connection:
+        for recipient in recipients:
+            # Render templates
+            subject = render_to_string(template_set["subject"], context).strip()
+            text_body = render_to_string(template_set["text"], context)
+            html_body = render_to_string(template_set["html"], context)
 
-                # Send emails
-                for recipient in recipients:
-                    # update context with this recipient
-                    context["user"] = recipient
+            # Construct message
+            message = EmailMultiAlternatives(
+                subject=subject,
+                body=text_body,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                to=[recipient.email],
+            )
+            message.extra_headers = {"Auto-Submitted": "auto-generated"}
+            message.attach_alternative(html_body, "text/html")
 
-                    # Translate text to the recipient language settings
-                    with override(
-                        recipient.wagtail_userprofile.get_preferred_language()
-                    ):
-                        # Get email subject and content
-                        email_subject = render_to_string(
-                            template_set["subject"], context
-                        ).strip()
-                        email_content = render_to_string(
-                            template_set["text"], context
-                        ).strip()
+            messages.append(message)
 
-                    kwargs = {}
-                    if getattr(settings, "WAGTAILADMIN_NOTIFICATION_USE_HTML", False):
-                        kwargs["html_message"] = render_to_string(
-                            template_set["html"], context
-                        )
-
-                    try:
-                        # Send email
-                        send_mail(
-                            email_subject,
-                            email_content,
-                            [recipient.email],
-                            connection=open_connection,
-                            **kwargs,
-                        )
-                        sent_count += 1
-                    except Exception:
-                        logger.exception(
-                            "Failed to send notification email '%s' to %s",
-                            email_subject,
-                            recipient.email,
-                        )
-        except (TimeoutError, ConnectionError):
-            logger.exception("Mail connection error, notification sending skipped")
-
-        return sent_count == len(recipients)
+        # Send messages
+        return connection.send_messages(messages)
+        
 
     def send_notifications(self, template_set, context, recipients, **kwargs):
         return self.send_emails(template_set, context, recipients, **kwargs)

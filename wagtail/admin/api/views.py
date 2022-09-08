@@ -130,18 +130,27 @@ class PagesAdminAPIViewSet(PagesAPIViewSet):
         return response
 
     def action_view(self, request, pk, action_name):
-        instance = self.get_object()
+        action = self.actions.get(action_name)
+        if action is None:
+            raise Http404
 
-        if action_name not in self.actions:
-            raise Http404(f"unrecognised action '{action_name}'")
+        page = self.get_object()
+        action = action(page=page, request=request)
 
-        action = self.actions[action_name](self, request)
-        action_data = action.serializer(data=request.data)
+        # Check permissions
+        if not action.permission_policy.user_has_permission_for_instance(
+            request.user, action_name, page
+        ):
+            return self.permission_denied(request)
 
-        if not action_data.is_valid():
-            return Response(action_data.errors, status=400)
+        # Run the action
+        result = action.run()
 
-        return action.execute(instance, action_data.data)
+        # Return the result
+        if isinstance(result, Response):
+            return result
+        else:
+            return Response(result)
 
     @classmethod
     def get_urlpatterns(cls):
