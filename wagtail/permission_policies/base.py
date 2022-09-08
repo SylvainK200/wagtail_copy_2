@@ -197,14 +197,13 @@ class BaseDjangoAuthPermissionPolicy(BasePermissionPolicy):
         through group permissions, user permissions, or implicitly through
         being a superuser.
         """
-        permissions = Permission.objects.filter(
-            content_type=self._content_type, codename__in=permission_codenames
+        return Q(
+            is_superuser=True,
+            **{
+                "groups__permissions__codename__in": permission_codenames,
+                "user_permissions__codename__in": permission_codenames,
+            }
         )
-        return (
-            Q(is_superuser=True)
-            | Q(user_permissions__in=permissions)
-            | Q(groups__permissions__in=permissions)
-        ) & Q(is_active=True)
 
     def _get_users_with_any_permission_codenames(self, permission_codenames):
         """
@@ -266,19 +265,15 @@ class OwnershipPermissionPolicy(BaseDjangoAuthPermissionPolicy):
             )
 
     def user_has_permission(self, user, action):
+        if user.is_superuser:
+            return True
+
         if action == "add":
-            return user.has_perm(self._get_permission_name("add"))
-        elif action == "change" or action == "delete":
-            return (
-                # having 'add' permission means that there are *potentially*
-                # some instances they can edit (namely: ones they own),
-                # which is sufficient for returning True here
-                user.has_perm(self._get_permission_name("add"))
-                or user.has_perm(self._get_permission_name("change"))
-            )
+            return user.has_perm(self._get_permission_name(action))
+        elif action in ["change", "delete"]:
+            return user.has_perm(self._get_permission_name("change"))
         else:
-            # unrecognised actions are only allowed for active superusers
-            return user.is_active and user.is_superuser
+            return False
 
     def users_with_any_permission(self, actions):
         if "change" in actions or "delete" in actions:
@@ -342,22 +337,21 @@ class OwnershipPermissionPolicy(BaseDjangoAuthPermissionPolicy):
 
     def users_with_any_permission_for_instance(self, actions, instance):
         if "change" in actions or "delete" in actions:
-            # get filter expression for users with 'change' permission
-            filter_expr = self._get_users_with_any_permission_codenames_filter(
-                ["change_%s" % self.model_name]
-            )
-
-            # add on the item's owner, if they still have 'add' permission
-            # (and the owner field isn't blank)
-            owner = getattr(instance, self.owner_field_name)
-            if owner is not None and owner.has_perm(self._get_permission_name("add")):
-                filter_expr = filter_expr | Q(pk=owner.pk)
-
-            # return the filtered queryset
-            return get_user_model().objects.filter(filter_expr).distinct()
-
+            # either 'add' or 'change' permission means that there are *potentially*
+            # some users who can edit this instance
+            permission_codenames = [
+                "add_%s" % self.model_name,
+                "change_%s" % self.model_name,
+            ]
+        elif "add" in actions:
+            # 'add' permission means that there are *potentially* some users who
+            # can create an instance
+            permission_codenames = [
+                "add_%s" % self.model_name,
+            ]
         else:
-            # action is either not recognised, or is the 'add' action which is
-            # not meaningful for existing instances. As such, the action is only
-            # available to superusers
+            # none of the actions passed in here are ones that we recognise, so only
+            # allow them for active superusers
             return get_user_model().objects.filter(is_active=True, is_superuser=True)
+
+        return self._get_users_with_any_permission_codenames(permission_codenames)

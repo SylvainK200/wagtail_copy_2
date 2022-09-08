@@ -27,23 +27,24 @@ class CollectionPermissionLookupMixin:
         If collection is specified, only consider GroupCollectionPermission records
         that apply to that collection.
         """
-        if not (user.is_active and user.is_authenticated):
-            return False
-
-        if user.is_superuser:
+        if user.is_active and user.is_superuser:
+            # active superusers can perform any action (including unrecognised ones)
             return True
 
-        collection_permissions = GroupCollectionPermission.objects.filter(
-            group__user=user,
-            permission__in=self._get_permission_objects_for_actions(actions),
-        )
+        if not user.is_authenticated:
+            return False
 
-        if collection:
-            collection_permissions = collection_permissions.filter(
-                collection__in=collection.get_ancestors(inclusive=True)
-            )
-
-        return collection_permissions.exists()
+        if collection is None:
+            # If the collection is not specified, check if the user has any permission
+            # on any collection
+            return self._collections_with_perm(user, actions).exists()
+        else:
+            # If the collection is specified, check if the user has any permission
+            # on that collection or any of its ancestors
+            collections = collection.get_ancestors(inclusive=True)
+            return self._collections_with_perm(user, actions).filter(
+                id__in=collections
+            ).exists()
 
     def _collections_with_perm(self, user, actions):
         """
@@ -262,23 +263,21 @@ class CollectionOwnershipPermissionPolicy(
         return self.user_has_any_permission_for_instance(user, [action], instance)
 
     def user_has_any_permission_for_instance(self, user, actions, instance):
-        if "change" in actions or "delete" in actions:
-            if self._check_perm(user, ["change"], collection=instance.collection):
+        if "add" in actions or "change" in actions or "delete" in actions:
+            # having 'add' permission means that there are *potentially*
+            # some instances they can edit (namely: ones they own),
+            # which is sufficient for returning True here
+            if self._check_perm(user, ["add", "change"], collection=instance.collection):
                 return True
-            elif (
-                self._check_perm(user, ["add"], collection=instance.collection)
-                and getattr(instance, self.owner_field_name) == user
-            ):
+
+        if "choose" in actions:
+            # having 'choose' permission means that there are *potentially*
+            # some instances they can edit (namely: ones they own),
+            # which is sufficient for returning True here
+            if self._check_perm(user, ["choose"], collection=instance.collection):
                 return True
-            else:
-                return False
-        elif "choose" in actions:
-            return self._check_perm(user, ["choose"], collection=instance.collection)
-        else:
-            # 'change' and 'delete' are the only actions that are well-defined
-            # for specific instances. Other actions are only available to
-            # active superusers.
-            return user.is_active and user.is_superuser
+
+        return False
 
     def instances_user_has_any_permission_for(self, user, actions):
         if user.is_active and user.is_superuser:
@@ -353,28 +352,17 @@ class CollectionOwnershipPermissionPolicy(
         """
         if user.is_active and user.is_superuser:
             # active superusers can perform any action (including unrecognised ones)
-            # in any collection
+            # on any collection
             return Collection.objects.all()
-
         elif not user.is_authenticated:
             return Collection.objects.none()
-
-        elif "change" in actions or "delete" in actions:
-            # return collections which are covered by either 'add' or 'change' permissions
-            # (since collections with 'add' permissions can *potentially* contain instances
-            # they own and can therefore edit)
-            return self._collections_with_perm(user, ["add", "change"])
-
-        elif "add" in actions:
-            return self._collections_with_perm(user, ["add"])
-
-        elif "choose" in actions:
-            return self._collections_with_perm(user, ["choose"])
-
         else:
-            # action is not recognised, and so non-superusers
-            # cannot perform it on any existing collections
-            return Collection.objects.none()
+            # form a filter expression of the collections for which they have
+            # the relevant permission
+            filter_expr = self._collections_with_perm_filter(user, actions)
+
+            # return the filtered queryset
+            return Collection.objects.filter(filter_expr).distinct()
 
 
 class CollectionMangementPermissionPolicy(
@@ -387,32 +375,10 @@ class CollectionMangementPermissionPolicy(
         delete where the user cannot modify the collection where they are granted permission.
         """
         # Get the permission object corresponding to this action
-        permission = self._get_permission_objects_for_actions([action]).first()
-
-        # Get the collections that have a GroupCollectionPermission record
-        # for this permission and any of the user's groups;
-        # create a list of their paths
-        collection_roots = Collection.objects.filter(
-            group_permissions__group__in=user.groups.all(),
-            group_permissions__permission=permission,
-        ).values("path", "depth")
-
-        if collection_roots:
-            # build a filter expression that will filter our model to just those
-            # instances in collections with a path that starts with one of the above
-            # but excluding the collection on which permission was granted
-            collection_path_filter = Q(
-                path__startswith=collection_roots[0]["path"]
-            ) & Q(depth__gt=collection_roots[0]["depth"])
-            for collection in collection_roots[1:]:
-                collection_path_filter = collection_path_filter | (
-                    Q(path__startswith=collection["path"])
-                    & Q(depth__gt=collection["depth"])
-                )
-            return Collection.objects.all().filter(collection_path_filter)
-        else:
-            # no matching collections
-            return Collection.objects.none()
+        return Collection.objects.filter(
+            groupcollectionpermission__group__user=user,
+            groupcollectionpermission__permission__codename=action,
+        ).get_descendants(include_self=True)
 
     def user_has_permission(self, user, action):
         """
