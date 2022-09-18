@@ -124,8 +124,6 @@ def send_notification(recipient_users, notification, extra_context):
     else:
         return send_mail(subject, body, recipient_emails, fail_silently=False)
 
-=======
-
 
 class Notifier:
     """Generic class for sending event notifications: callable, intended to be connected to a signal to send

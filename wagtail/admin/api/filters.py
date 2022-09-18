@@ -27,7 +27,7 @@ class HasChildrenFilter(BaseFilterBackend):
 
 
 class ForExplorerFilter(BaseFilterBackend):
-    ef filter_queryset(self, request, queryset, view):
+    def filter_queryset(self, request, queryset, view):
         
         if "for_explorer" in request.GET:
             try:
